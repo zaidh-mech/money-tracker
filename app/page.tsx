@@ -99,7 +99,7 @@ export default function Home() {
 
   useEffect(() => { if (ready) localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }, [ready, state]);
 
-  const accountMovement = (id: string) => state.entries.reduce((sum, e) => {
+  const entryMovement = (e: Entry, id: string) => {
     const transaction = e.accountId === id ? (e.kind === "income" ? 1 : -1) * Number(e.amount) : 0;
     const saved = Number(e.savingsAmount) || 0;
     const transferOut = e.kind === "income" && e.accountId === id ? saved : 0;
@@ -107,9 +107,20 @@ export default function Home() {
     const cash = Number(e.cashAmount) || 0;
     const cashOut = e.kind === "income" && e.accountId === id ? cash : 0;
     const cashIn = e.kind === "income" && e.cashAccountId === id ? cash : 0;
-    return sum + transaction - transferOut + transferIn - cashOut + cashIn;
-  }, 0);
+    return transaction - transferOut + transferIn - cashOut + cashIn;
+  };
+  const accountMovement = (id: string) => state.entries.reduce((sum, e) => sum + entryMovement(e, id), 0);
   const accountBalance = (item: Account) => item.openingBalance + accountMovement(item.id);
+  const chronologicalEntries = [...state.entries].filter(e => e.date).sort((a, b) => a.date.localeCompare(b.date) || a.created - b.created);
+  const runningBalances = new Map(state.accounts.map(a => [a.id, a.openingBalance]));
+  const balanceAfterEntry = new Map<string, number>();
+  for (const e of chronologicalEntries) {
+    for (const a of state.accounts) {
+      const movement = entryMovement(e, a.id);
+      if (movement !== 0) runningBalances.set(a.id, (runningBalances.get(a.id) || 0) + movement);
+    }
+    if (e.accountId) balanceAfterEntry.set(e.id, runningBalances.get(e.accountId) || 0);
+  }
   const entries = state.entries.filter(e => e.date && e.date.slice(0, 7) === month);
   const income = entries.filter(e => e.kind === "income").reduce((sum, e) => sum + e.amount, 0);
   const expenses = entries.filter(e => e.kind === "expense").reduce((sum, e) => sum + e.amount, 0);
@@ -250,7 +261,12 @@ export default function Home() {
           <div className="field"><label htmlFor="date">Date</label><input id="date" type="date" required value={date} onChange={e => setDate(e.target.value)} /></div>{entryError && <div className="form-error" role="alert">{entryError}</div>}<button className="submit" type="submit">Add {kind}</button></form>
         <div className="rightcol">
           <section className="panel savings" aria-labelledby="savingsHeading"><div className="savings-head"><div className="savings-title"><div className="savings-icon" aria-hidden="true">↗</div><div><h2 id="savingsHeading">NDB savings</h2><p className="savings-sub">Salary transfers from Commercial Bank; other income is opt-in.</p></div></div><strong className="savings-rate">{state.rate}%</strong></div><div className="bar" aria-label="Monthly savings progress"><div className="bar-fill" style={{ width: `${Math.max(0, Math.min(100, state.rate))}%` }} /></div><div className="savings-foot"><span>{money(Math.max(0, setAside))} moved this month</span><strong>{money(allSaved)} total saved</strong></div><div className="cash-balance">Cash wallet: <strong>{money(cashAccount ? accountBalance(cashAccount) : 0)}</strong> · {money(cashMoved)} added this month</div></section>
-          <section className="panel activity" aria-labelledby="activityHeading"><div className="activity-head"><h2 id="activityHeading">Transactions</h2><span className="count">{entries.length} {entries.length === 1 ? "entry" : "entries"}</span></div><div className="rows">{sorted.length ? sorted.map(e => { const linked = state.accounts.find(a => a.id === e.accountId); const details = e.kind === "income" ? (linked ? `Income to ${linked.name}` : "Income") : `From ${e.account}`; return <div className="row" key={e.id}><div className="row-main"><div className={`row-icon ${e.kind === "expense" ? "expense" : ""}`} aria-hidden="true">{e.kind === "income" ? "+" : "−"}</div><div className="row-copy"><div className="row-name">{e.description}</div><div className="row-meta">{details} · {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(`${e.date}T00:00:00`))}</div></div></div><div className={`row-value ${e.kind}`}>{e.kind === "income" ? "+" : "−"}{money(e.amount)}</div><button className="delete" type="button" onClick={() => setState(s => ({ ...s, entries: s.entries.filter(entry => entry.id !== e.id) }))} aria-label={`Delete ${e.description}`}>×</button></div>; }) : <div className="empty">No transactions for this month yet.<br />Add your income or an expense to get started.</div>}</div></section>
+          <section className="panel activity" aria-labelledby="activityHeading"><div className="activity-head"><h2 id="activityHeading">Transactions</h2><span className="count">{entries.length} {entries.length === 1 ? "entry" : "entries"}</span></div><p className="panel-caption date-balance-caption">Account balances follow transaction dates, so adding an earlier income recalculates the later balances.</p><div className="rows">{sorted.length ? sorted.map(e => {
+            const linked = state.accounts.find(a => a.id === e.accountId);
+            const details = e.kind === "income" ? (linked ? `Income to ${linked.name}` : "Income") : `From ${e.account}`;
+            const balance = balanceAfterEntry.get(e.id);
+            return <div className="row" key={e.id}><div className="row-main"><div className={`row-icon ${e.kind === "expense" ? "expense" : ""}`} aria-hidden="true">{e.kind === "income" ? "+" : "−"}</div><div className="row-copy"><div className="row-name">{e.description}</div><div className="row-meta">{details} · {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(`${e.date}T00:00:00`))}</div>{linked && balance !== undefined && <div className="row-meta balance-meta">{linked.name} after this: {money(balance)}</div>}</div></div><div className={`row-value ${e.kind}`}>{e.kind === "income" ? "+" : "−"}{money(e.amount)}</div><button className="delete" type="button" onClick={() => setState(s => ({ ...s, entries: s.entries.filter(entry => entry.id !== e.id) }))} aria-label={`Delete ${e.description}`}>×</button></div>;
+          }) : <div className="empty">No transactions for this month yet.<br />Add your income or an expense to get started.</div>}</div></section>
         </div>
       </section>
     </main><footer className="footer">Your entries stay saved in this browser. Download a PDF for any selected month.</footer>
