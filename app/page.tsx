@@ -1,7 +1,11 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
+import { App } from "@capacitor/app";
+import { Browser } from "@capacitor/browser";
+import type { Session } from "@supabase/supabase-js";
+import { isNativeApp, nativeAuthRedirect, supabase } from "@/lib/supabase";
 
 type Kind = "income" | "expense";
 type Budget = { id: string; name: string; percent: number };
@@ -95,6 +99,13 @@ export default function Home() {
   const [entryError, setEntryError] = useState("");
   const [budgetError, setBudgetError] = useState("");
   const [dayLabel, setDayLabel] = useState("");
+  const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [syncEnabled, setSyncEnabled] = useState(false);
+  const [syncStatus, setSyncStatus] = useState("Local only");
+  const [lastSyncedTime, setLastSyncedTime] = useState("");
+  const lastSyncedJson = useRef("");
 
   useEffect(() => {
     setDayLabel(new Intl.DateTimeFormat(undefined, { weekday: "short", month: "long", day: "numeric" }).format(new Date()));
@@ -121,6 +132,92 @@ export default function Home() {
   }, []);
 
   useEffect(() => { if (ready) localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }, [ready, state]);
+
+  useEffect(() => {
+    if (!supabase) { setAuthReady(true); setSyncStatus("Cloud setup needed"); return; }
+    let alive = true;
+    supabase.auth.getSession().then(({ data }) => { if (alive) { setSession(data.session); setAuthReady(true); } });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
+    return () => { alive = false; subscription.unsubscribe(); };
+  }, []);
+
+  useEffect(() => {
+    if (!supabase) return;
+    const completeCallback = async (url: string) => {
+      try {
+        const parsed = new URL(url);
+        const code = parsed.searchParams.get("code");
+        if (code) {
+          const { error } = await supabase!.auth.exchangeCodeForSession(code);
+          if (error) setAuthError(error.message);
+          if (isNativeApp()) await Browser.close();
+        }
+      } catch { /* Ignore unrelated app links. */ }
+    };
+    if (typeof window !== "undefined" && window.location.search.includes("code=")) void completeCallback(window.location.href);
+    if (isNativeApp()) {
+      const listener = App.addListener("appUrlOpen", ({ url }) => { void completeCallback(url); });
+      return () => { void listener.then(handle => handle.remove()); };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!ready || !authReady || !session?.user || !supabase) {
+      setSyncEnabled(false);
+      return;
+    }
+    let cancelled = false;
+    let channel: ReturnType<NonNullable<typeof supabase>["channel"]> | undefined;
+    const userId = session.user.id;
+    const connect = async () => {
+      setSyncStatus("Connecting…");
+      const { data, error } = await supabase!.from("money_tracker_state").select("tracker_data").eq("user_id", userId).maybeSingle();
+      if (cancelled) return;
+      if (error) { setSyncStatus("Sync error"); setAuthError(error.message); return; }
+      const previousOwner = localStorage.getItem(`${STORAGE_KEY}-owner`);
+      const canImportLocal = !previousOwner || previousOwner === userId;
+      const localData = canImportLocal ? state : emptyState;
+      if (data?.tracker_data) {
+        const remoteData = data.tracker_data as State;
+        setState(remoteData);
+        lastSyncedJson.current = JSON.stringify(remoteData);
+      } else {
+        const initialData = localData;
+        const { error: saveError } = await supabase!.from("money_tracker_state").upsert({ user_id: userId, display_name: session.user.user_metadata?.full_name || session.user.email || "My account", tracker_data: initialData, updated_at: new Date().toISOString() });
+        if (cancelled) return;
+        if (saveError) { setSyncStatus("Sync error"); setAuthError(saveError.message); return; }
+        setState(initialData);
+        lastSyncedJson.current = JSON.stringify(initialData);
+      }
+      localStorage.setItem(`${STORAGE_KEY}-owner`, userId);
+      setSyncEnabled(true);
+      setSyncStatus("Synced");
+      channel = supabase!.channel(`money-tracker-${userId}`).on("postgres_changes", { event: "UPDATE", schema: "public", table: "money_tracker_state", filter: `user_id=eq.${userId}` }, payload => {
+        const remoteData = payload.new.tracker_data as State;
+        if (remoteData && JSON.stringify(remoteData) !== lastSyncedJson.current) {
+          lastSyncedJson.current = JSON.stringify(remoteData);
+          setState(remoteData);
+          setSyncStatus("Synced from another device");
+        }
+      }).subscribe();
+    };
+    void connect();
+    return () => { cancelled = true; setSyncEnabled(false); if (channel) void supabase!.removeChannel(channel); };
+  }, [ready, authReady, session?.user.id]);
+
+  useEffect(() => {
+    if (!syncEnabled || !session?.user || !supabase) return;
+    const serialized = JSON.stringify(state);
+    if (serialized === lastSyncedJson.current) return;
+    const timer = window.setTimeout(async () => {
+      setSyncStatus("Syncing…");
+      const { error } = await supabase!.from("money_tracker_state").upsert({ user_id: session.user.id, display_name: session.user.user_metadata?.full_name || session.user.email || "My account", tracker_data: state, updated_at: new Date().toISOString() });
+      if (error) { setSyncStatus("Sync error"); setAuthError(error.message); }
+      else { lastSyncedJson.current = serialized; setLastSyncedTime(new Date().toLocaleTimeString()); setSyncStatus("Synced"); }
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [state, session?.user.id, syncEnabled]);
+
 
   const entryMovement = (e: Entry, id: string) => {
     const transaction = e.accountId === id ? (e.kind === "income" ? 1 : -1) * Number(e.amount) : 0;
@@ -163,6 +260,23 @@ export default function Home() {
   const plannedPercent = state.rate + state.cashRate + state.budgets.reduce((sum, b) => sum + b.percent, 0);
   const overBudget = budgetTotals.filter(b => b.spent > b.allocated + 0.005);
   const sorted = [...entries].sort((a, b) => b.date.localeCompare(a.date) || b.created - a.created);
+
+  async function signInWithGoogle() {
+    setAuthError("");
+    if (!supabase) { setAuthError("Cloud sync is not configured yet. Add the Supabase project settings first."); return; }
+    const native = isNativeApp();
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: native ? nativeAuthRedirect : `${window.location.origin}${window.location.pathname}`, skipBrowserRedirect: native },
+    });
+    if (error) setAuthError(error.message);
+    else if (native && data.url) await Browser.open({ url: data.url });
+  }
+
+  async function signOut() {
+    if (supabase) await supabase.auth.signOut();
+    setSession(null); setSyncEnabled(false); setSyncStatus("Local only");
+  }
 
   function submitEntry(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -255,7 +369,8 @@ export default function Home() {
   }
 
   return <div className="shell">
-    <header className="topbar"><div className="brand"><div className="mark" aria-hidden="true">$</div><span>My money</span></div><div className="today">{dayLabel}</div></header>
+    <header className="topbar"><div className="brand"><div className="mark" aria-hidden="true">$</div><span>My money</span></div><div className="cloud-account"><div className="cloud-identity">{session ? (session.user.user_metadata?.full_name || session.user.email || "Google account") : "Tracker account"}<small>{syncStatus}{lastSyncedTime ? ` · ${lastSyncedTime}` : ""}</small></div>{session ? <button className="account-edit" type="button" onClick={signOut}>Sign out</button> : <button className="google-signin" type="button" disabled={!supabase || !authReady} onClick={signInWithGoogle}>Continue with Google</button>}</div><div className="today">{dayLabel}</div></header>
+    {authError && <div className="auth-error" role="alert">{authError}</div>}
     <main>
       <div className="heading"><div><p className="eyebrow">Your overview</p><h1>Money, made simple.</h1></div><div className="heading-actions"><label className="period"><span>Month</span><input type="month" aria-label="Choose month" value={month} onChange={e => setMonth(e.target.value)} /></label><button className="report-button" type="button" onClick={downloadReport}>Download monthly PDF</button></div></div>
       <section className="cards" aria-label="Monthly totals">

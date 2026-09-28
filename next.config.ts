@@ -1,9 +1,10 @@
 import type { NextConfig } from "next";
 
 const isGitHubPages = process.env.GITHUB_PAGES === "true";
+const isCapacitorBuild = process.env.CAPACITOR_BUILD === "true";
 
 const nextConfig: NextConfig = {
-  ...(isGitHubPages ? { output: "export", basePath: "/money-tracker", trailingSlash: true } : {}),
+  ...(isGitHubPages || isCapacitorBuild ? { output: "export", ...(isGitHubPages ? { basePath: "/money-tracker" } : {}), trailingSlash: true } : {}),
 };
 
 export default nextConfig;
