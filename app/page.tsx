@@ -137,8 +137,8 @@ export default function Home() {
   useEffect(() => {
     if (!supabase) { setAuthReady(true); setSyncStatus("Cloud setup needed"); return; }
     let alive = true;
-    supabase.auth.getSession().then(({ data }) => { if (alive) { setSession(data.session); setAuthReady(true); } });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
+    supabase.auth.getSession().then(({ data }) => { if (alive) { setSession(data.session); if (data.session) setAuthError(""); setAuthReady(true); } });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => { setSession(nextSession); if (nextSession) setAuthError(""); });
     return () => { alive = false; subscription.unsubscribe(); };
   }, []);
 
@@ -154,6 +154,12 @@ export default function Home() {
           parsed.searchParams.delete("code");
           parsed.searchParams.delete("sb_flow_id");
           window.history.replaceState(window.history.state, "", `${parsed.pathname}${parsed.search}${parsed.hash}`);
+        }
+        const { data: existing } = await supabase!.auth.getSession();
+        if (existing.session) {
+          setAuthError("");
+          if (isNativeApp()) await Browser.close();
+          return;
         }
         const { error } = await supabase!.auth.exchangeCodeForSession(code);
         if (error) {
