@@ -106,6 +106,7 @@ export default function Home() {
   const [syncStatus, setSyncStatus] = useState("Local only");
   const [lastSyncedTime, setLastSyncedTime] = useState("");
   const lastSyncedJson = useRef("");
+  const authCallbackCode = useRef("");
 
   useEffect(() => {
     setDayLabel(new Intl.DateTimeFormat(undefined, { weekday: "short", month: "long", day: "numeric" }).format(new Date()));
@@ -147,11 +148,20 @@ export default function Home() {
       try {
         const parsed = new URL(url);
         const code = parsed.searchParams.get("code");
-        if (code) {
-          const { error } = await supabase!.auth.exchangeCodeForSession(code);
-          if (error) setAuthError(error.message);
-          if (isNativeApp()) await Browser.close();
+        if (!code || authCallbackCode.current === code) return;
+        authCallbackCode.current = code;
+        if (!isNativeApp() && parsed.origin === window.location.origin) {
+          parsed.searchParams.delete("code");
+          parsed.searchParams.delete("sb_flow_id");
+          window.history.replaceState(window.history.state, "", `${parsed.pathname}${parsed.search}${parsed.hash}`);
         }
+        const { error } = await supabase!.auth.exchangeCodeForSession(code);
+        if (error) {
+          const { data } = await supabase!.auth.getSession();
+          if (!data.session) setAuthError(error.message);
+          else setAuthError("");
+        } else setAuthError("");
+        if (isNativeApp()) await Browser.close();
       } catch { /* Ignore unrelated app links. */ }
     };
     if (typeof window !== "undefined" && window.location.search.includes("code=")) void completeCallback(window.location.href);
