@@ -49,6 +49,22 @@ function isCommercialBank(name: string) {
 function isCashWallet(name: string) {
   return /^cash wallet$/i.test(name.trim());
 }
+function normalizeAccountName(name: string) {
+  const normalized = name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return normalized.startsWith("hattonnationalbank") || normalized.startsWith("hattomnationalbank") ? "hnb" : normalized;
+}
+function matchAccountByName(name: string, accounts: Account[]) {
+  const normalized = normalizeAccountName(name);
+  if (!normalized) return undefined;
+  const validAccounts = accounts.filter(a => a && typeof a.id === "string" && typeof a.name === "string");
+  const exact = validAccounts.filter(a => normalizeAccountName(a.name) === normalized);
+  if (exact.length === 1) return exact[0];
+  const prefix = validAccounts.filter(a => {
+    const candidate = normalizeAccountName(a.name);
+    return Math.min(candidate.length, normalized.length) >= 3 && (candidate.startsWith(normalized) || normalized.startsWith(candidate));
+  });
+  return prefix.length === 1 ? prefix[0] : undefined;
+}
 function addCoreAccounts(accounts: Account[]) {
   const result = [...accounts];
   for (const core of coreAccounts) {
@@ -85,9 +101,16 @@ export default function Home() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
       if (saved && Array.isArray(saved.entries)) {
+        const savedAccounts = addCoreAccounts(Array.isArray(saved.accounts) ? saved.accounts.filter((a: Account) => a && typeof a.id === "string" && typeof a.name === "string" && Number.isFinite(Number(a.openingBalance))).map((a: Account) => ({ ...a, openingBalance: Number(a.openingBalance) })) : []);
         setState({
-          entries: saved.entries.filter((e: Entry) => e && ["income", "expense"].includes(e.kind) && Number.isFinite(Number(e.amount))),
-          accounts: addCoreAccounts(Array.isArray(saved.accounts) ? saved.accounts.filter((a: Account) => a && typeof a.id === "string" && typeof a.name === "string" && Number.isFinite(Number(a.openingBalance))).map((a: Account) => ({ ...a, openingBalance: Number(a.openingBalance) })) : []),
+          entries: saved.entries.filter((e: Entry) => e && ["income", "expense"].includes(e.kind) && Number.isFinite(Number(e.amount))).map((e: Entry) => {
+            if (e.kind !== "expense") return e;
+            const linkedId = savedAccounts.find(a => a.id === e.accountId);
+            if (linkedId && normalizeAccountName(linkedId.name) === normalizeAccountName(e.account)) return e;
+            const linkedName = matchAccountByName(e.account, savedAccounts);
+            return linkedName ? { ...e, accountId: linkedName.id } : e;
+          }),
+          accounts: savedAccounts,
           rate: Math.max(0, Math.min(100, Number.isFinite(Number(saved.rate)) ? Number(saved.rate) : 20)),
           cashRate: Math.max(0, Math.min(100, Number.isFinite(Number(saved.cashRate)) ? Number(saved.cashRate) : 0)),
           budgets: Array.isArray(saved.budgets) ? saved.budgets.filter((b: Budget) => b && typeof b.id === "string" && typeof b.name === "string").map((b: Budget) => ({ ...b, percent: Math.max(0, Math.min(100, Number(b.percent) || 0)) })) : defaultBudgets,
@@ -152,7 +175,7 @@ export default function Home() {
     const activePercent = (usePlan ? state.rate + budgetPercent : 0) + (useCash ? state.cashRate : 0);
     if (kind === "income" && activePercent > 100) { setEntryError("The percentages enabled for this income add up to more than 100%."); return; }
     const linked = kind === "expense"
-      ? state.accounts.find(a => a.name.toLowerCase() === account.trim().toLowerCase())
+      ? state.accounts.find(a => a.id === account)
       : salary ? state.accounts.find(a => isCommercialBank(a.name)) : state.accounts.find(a => a.id === depositAccount);
     const savingsAmount = usePlan ? roundMoney(value * state.rate / 100) : 0;
     const allocations = usePlan ? state.budgets.map(b => ({ budgetId: b.id, name: b.name, amount: roundMoney(value * b.percent / 100) })).filter(a => a.amount > 0) : [];
@@ -164,7 +187,7 @@ export default function Home() {
     const ensuredSavingsAccount = savingsAmount > 0 ? (savingsAccount || { id: newId(), name: "National Development Bank", openingBalance: 0 }) : undefined;
     const ensuredAccounts = addCoreAccounts(state.accounts);
     const ensuredCashAccount = ensuredAccounts.find(a => isCashWallet(a.name));
-    const entry: Entry = { id: newId(), kind, description: description.trim(), account: kind === "expense" ? account.trim() : "", accountId: linked?.id || "", amount: value, date, created: Date.now(), allocationsEnabled: usePlan, savingsAmount, savingsAccountId: ensuredSavingsAccount?.id || "", allocations, cashAmount, cashAccountId: ensuredCashAccount?.id || "" };
+    const entry: Entry = { id: newId(), kind, description: description.trim(), account: kind === "expense" ? (linked?.name || "") : "", accountId: linked?.id || "", amount: value, date, created: Date.now(), allocationsEnabled: usePlan, savingsAmount, savingsAccountId: ensuredSavingsAccount?.id || "", allocations, cashAmount, cashAccountId: ensuredCashAccount?.id || "" };
     const category = kind === "expense" ? budgetTotals.find(b => b.name.trim().toLowerCase() === description.trim().toLowerCase()) : undefined;
     const warning = category && category.spent + value > category.allocated + 0.005
       ? `${category.name} is over its allocation by ${money(category.spent + value - category.allocated)} this month.`
@@ -190,6 +213,12 @@ export default function Home() {
     const next = Number(input);
     if (!Number.isFinite(next)) { window.alert("Enter a valid number for the balance."); return; }
     setState(current => ({ ...current, accounts: current.accounts.map(a => a.id === item.id ? { ...a, openingBalance: next - accountMovement(item.id) } : a) }));
+  }
+
+  function linkExpenseToAccount(entryId: string, accountId: string) {
+    const linked = state.accounts.find(a => a.id === accountId);
+    if (!linked) return;
+    setState(current => ({ ...current, entries: current.entries.map(e => e.id === entryId ? { ...e, accountId: linked.id, account: linked.name } : e) }));
   }
 
   function addBudget(event: FormEvent<HTMLFormElement>) {
@@ -256,7 +285,7 @@ export default function Home() {
           <div className="field"><label htmlFor="description">{kind === "income" ? "Income source" : "Expense type"}</label><input id="description" required maxLength={60} placeholder={kind === "income" ? "e.g. Salary, ICBT fees, Monthly deposit" : "e.g. Phone bill"} autoComplete="off" value={description} onChange={e => { setDescription(e.target.value); if (kind === "income") { const salary = /salary/i.test(e.target.value); setApplyPlan(salary); if (salary) setDepositAccount(state.accounts.find(a => isCommercialBank(a.name))?.id || ""); } }} /></div>
           {kind === "income" && <label className="distribution-toggle"><input type="checkbox" checked={applyPlan} onChange={e => setApplyPlan(e.target.checked)} /><span className="toggle-track" aria-hidden="true" /><span><strong>Distribute this income</strong><small>{applyPlan ? `Apply ${state.rate}% savings and your budget percentages` : "Leave this income untouched"}</small></span></label>}
           {kind === "income" && <label className="distribution-toggle cash-toggle"><input type="checkbox" checked={fundCash} onChange={e => setFundCash(e.target.checked)} /><span className="toggle-track" aria-hidden="true" /><span><strong>Fund Cash Wallet from this income</strong><small>{fundCash ? `Transfer ${state.cashRate}% from the account selected below` : "Turn on for an income source that should fund cash"}</small></span></label>}
-          {kind === "expense" ? <div className="field"><label htmlFor="account">Paid from account</label><input id="account" required maxLength={40} list="accountOptions" placeholder="e.g. Cash Wallet, Commercial Bank" autoComplete="off" value={account} onChange={e => setAccount(e.target.value)} /><datalist id="accountOptions">{state.accounts.map(a => <option value={a.name} key={a.id} />)}</datalist></div> : /salary/i.test(description) ? <div className="field"><label>Salary deposited into</label><div className="source-account">Commercial Bank</div></div> : <div className="field"><label htmlFor="depositAccount">Deposited into <span className="optional">(optional unless transferring savings or cash)</span></label><select id="depositAccount" required={(applyPlan && state.rate > 0) || (fundCash && state.cashRate > 0)} value={depositAccount} onChange={e => setDepositAccount(e.target.value)}><option value="">Choose an account</option>{state.accounts.filter(a => !isCashWallet(a.name)).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>}
+          {kind === "expense" ? <div className="field"><label htmlFor="account">Paid from account</label><select id="account" required value={account} onChange={e => setAccount(e.target.value)}><option value="">Choose an account</option>{state.accounts.map(a => <option value={a.id} key={a.id}>{a.name}</option>)}</select></div> : /salary/i.test(description) ? <div className="field"><label>Salary deposited into</label><div className="source-account">Commercial Bank</div></div> : <div className="field"><label htmlFor="depositAccount">Deposited into <span className="optional">(optional unless transferring savings or cash)</span></label><select id="depositAccount" required={(applyPlan && state.rate > 0) || (fundCash && state.cashRate > 0)} value={depositAccount} onChange={e => setDepositAccount(e.target.value)}><option value="">Choose an account</option>{state.accounts.filter(a => !isCashWallet(a.name)).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>}
           <div className="field"><label htmlFor="amount">Amount</label><div className="amount-wrap"><span>LKR</span><input id="amount" type="number" required min="0.01" step="0.01" placeholder="0.00" inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} /></div></div>
           <div className="field"><label htmlFor="date">Date</label><input id="date" type="date" required value={date} onChange={e => setDate(e.target.value)} /></div>{entryError && <div className="form-error" role="alert">{entryError}</div>}<button className="submit" type="submit">Add {kind}</button></form>
         <div className="rightcol">
@@ -265,7 +294,7 @@ export default function Home() {
             const linked = state.accounts.find(a => a.id === e.accountId);
             const details = e.kind === "income" ? (linked ? `Income to ${linked.name}` : "Income") : `From ${e.account}`;
             const balance = balanceAfterEntry.get(e.id);
-            return <div className="row" key={e.id}><div className="row-main"><div className={`row-icon ${e.kind === "expense" ? "expense" : ""}`} aria-hidden="true">{e.kind === "income" ? "+" : "−"}</div><div className="row-copy"><div className="row-name">{e.description}</div><div className="row-meta">{details} · {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(`${e.date}T00:00:00`))}</div>{linked && balance !== undefined && <div className="row-meta balance-meta">{linked.name} after this: {money(balance)}</div>}</div></div><div className={`row-value ${e.kind}`}>{e.kind === "income" ? "+" : "−"}{money(e.amount)}</div><button className="delete" type="button" onClick={() => setState(s => ({ ...s, entries: s.entries.filter(entry => entry.id !== e.id) }))} aria-label={`Delete ${e.description}`}>×</button></div>;
+            return <div className="row" key={e.id}><div className="row-main"><div className={`row-icon ${e.kind === "expense" ? "expense" : ""}`} aria-hidden="true">{e.kind === "income" ? "+" : "−"}</div><div className="row-copy"><div className="row-name">{e.description}</div><div className="row-meta">{details} · {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(`${e.date}T00:00:00`))}</div>{linked && balance !== undefined && <div className="row-meta balance-meta">{linked.name} after this: {money(balance)}</div>}{e.kind === "expense" && !linked && <select className="row-account-link" aria-label={`Link ${e.description} to an account`} value="" onChange={event => linkExpenseToAccount(e.id, event.target.value)}><option value="">Choose account to fix balance</option>{state.accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select>}</div></div><div className={`row-value ${e.kind}`}>{e.kind === "income" ? "+" : "−"}{money(e.amount)}</div><button className="delete" type="button" onClick={() => setState(s => ({ ...s, entries: s.entries.filter(entry => entry.id !== e.id) }))} aria-label={`Delete ${e.description}`}>×</button></div>;
           }) : <div className="empty">No transactions for this month yet.<br />Add your income or an expense to get started.</div>}</div></section>
         </div>
       </section>
