@@ -1,6 +1,6 @@
 # Money Tracker
 
-A simple personal income, spending, and savings tracker built with Next.js. Entries and accounts are stored in the browser using local storage.
+A personal income, spending, and savings tracker built with Next.js. Entries, accounts, and budget settings are stored in the browser using local storage. Salary entries enable the budget plan by default; other income sources stay undistributed until enabled. Monthly reports can be downloaded as PDFs from the selected month.
 
 ## Run locally
 
