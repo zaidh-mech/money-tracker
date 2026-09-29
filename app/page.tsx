@@ -271,6 +271,7 @@ export default function Home() {
     spent: entries.filter(e => e.kind === "expense" && e.description.trim().toLowerCase() === budget.name.trim().toLowerCase()).reduce((sum, e) => sum + e.amount, 0),
   }));
   const budgetAllocated = budgetTotals.reduce((sum, b) => sum + b.allocated, 0);
+  const leftToSpend = income - expenses - setAside - budgetAllocated;
   const cashMoved = entries.reduce((sum, e) => sum + (Number(e.cashAmount) || 0), 0);
   const cashAccount = state.accounts.find(a => isCashWallet(a.name));
   const cashReceived = cashMoved + entries.filter(e => e.kind === "income" && e.accountId === cashAccount?.id).reduce((sum, e) => sum + e.amount, 0);
@@ -371,7 +372,7 @@ export default function Home() {
     doc.setFontSize(11); doc.text(title, 15, y); y += 10;
     doc.setFontSize(12); doc.text("Monthly summary", 15, y); y += 7;
     doc.setFontSize(10);
-    [`Income: ${reportMoney(income)}`, `Expenses: ${reportMoney(expenses)}`, `Moved to NDB savings: ${reportMoney(setAside)}`, `NDB account balance: ${reportMoney(ndbAccount ? accountBalance(ndbAccount) : 0)}`, `Moved to Cash Wallet: ${reportMoney(cashMoved)}`, `Direct cash income: ${reportMoney(cashReceived - cashMoved)}`, `Cash Wallet balance: ${reportMoney(cashAccount ? accountBalance(cashAccount) : 0)}`, `Budget categories reserved: ${reportMoney(budgetAllocated)}`, `Left after spending and allocations: ${reportMoney(income - expenses - setAside - cashMoved - budgetAllocated)}`].forEach(line => { doc.text(line, 15, y); y += 6; });
+    [`Income: ${reportMoney(income)}`, `Expenses: ${reportMoney(expenses)}`, `Moved to NDB savings: ${reportMoney(setAside)}`, `NDB account balance: ${reportMoney(ndbAccount ? accountBalance(ndbAccount) : 0)}`, `Moved to Cash Wallet: ${reportMoney(cashMoved)}`, `Direct cash income: ${reportMoney(cashReceived - cashMoved)}`, `Cash Wallet balance: ${reportMoney(cashAccount ? accountBalance(cashAccount) : 0)}`, `Budget categories reserved: ${reportMoney(budgetAllocated)}`, `Left after spending and allocations: ${reportMoney(leftToSpend)}`].forEach(line => { doc.text(line, 15, y); y += 6; });
     y += 4; doc.setFontSize(12); doc.text("Budget categories", 15, y); y += 7; doc.setFontSize(10);
     budgetTotals.forEach(b => { if (y > 275) { doc.addPage(); y = 18; } doc.text(`${b.name} (${b.percent}%): reserved ${reportMoney(b.allocated)} | spent ${reportMoney(b.spent)}`, 15, y); y += 6; });
     y += 4; doc.setFontSize(12); doc.text("Transactions", 15, y); y += 7; doc.setFontSize(10);
@@ -396,7 +397,7 @@ export default function Home() {
         <article className="card"><div className="card-label"><span className="dot" />Income</div><div className="amount">{money(income)}</div><div className="card-note">this month</div></article>
         <article className="card"><div className="card-label"><span className="dot" />Expenses</div><div className="amount">{money(expenses)}</div><div className="card-note">this month</div></article>
         <article className="card"><div className="card-label"><span className="dot" />Saved</div><div className="amount">{money(monthSaved)}</div><div className="card-note">to National Development Bank{spentFromSavings ? ` · ${money(spentFromSavings)} used` : ""}</div></article>
-        <article className="card"><div className="card-label"><span className="dot" />Left to spend</div><div className="amount">{money(income - expenses - setAside - cashMoved - budgetAllocated)}</div><div className="card-note">after expenses and planned allocations</div></article>
+        <article className="card"><div className="card-label"><span className="dot" />Left to spend</div><div className="amount">{money(leftToSpend)}</div><div className="card-note">after expenses and planned allocations</div></article>
       </section>
       <section className="panel accounts" aria-labelledby="accountsHeading"><div className="accounts-head"><h2 id="accountsHeading">Bank accounts</h2><span className="accounts-total">{money(bankAccountsTotal)} total</span></div>
         <div className="account-list">{bankAccounts.length ? bankAccounts.map(a => <div className="account-item" key={a.id}><div className="account-info"><div className="account-name">{a.name}</div><div className="account-balance">{money(accountBalance(a))}</div></div><button className="account-edit" type="button" onClick={() => updateAccount(a)} aria-label={`Update ${a.name} balance`}>Update</button></div>) : <div className="account-empty">Add your accounts and their balances to see them here.</div>}</div>
