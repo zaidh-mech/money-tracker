@@ -1,10 +1,11 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { jsPDF } from "jspdf";
 import { App } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
 import type { Session } from "@supabase/supabase-js";
+import { createMonthlyReport } from "@/lib/monthly-report";
+import { PdfExport } from "@/lib/pdf-export";
 import { isNativeApp, nativeAuthRedirect, supabase } from "@/lib/supabase";
 
 type Kind = "income" | "expense";
@@ -105,6 +106,8 @@ export default function Home() {
   const [syncEnabled, setSyncEnabled] = useState(false);
   const [syncStatus, setSyncStatus] = useState("Local only");
   const [lastSyncedTime, setLastSyncedTime] = useState("");
+  const [reportStatus, setReportStatus] = useState("");
+  const [reportBusy, setReportBusy] = useState(false);
   const lastSyncedJson = useRef("");
   const authCallbackCode = useRef("");
 
@@ -362,37 +365,45 @@ export default function Home() {
     setBudgetError(""); setState(current => ({ ...current, budgets: [...current.budgets, { id: newId(), name, percent }] })); setBudgetName(""); setBudgetPercent("");
   }
 
-  function downloadReport() {
-    const doc = new jsPDF();
-    const title = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(new Date(`${month}-01T00:00:00`));
-    const reportEntries = [...entries].sort((a, b) => a.date.localeCompare(b.date) || a.created - b.created);
-    const reportMoney = (value: number) => `LKR ${Number(value || 0).toFixed(2)}`;
-    let y = 18;
-    doc.setFontSize(19); doc.text("Monthly budget report", 15, y); y += 9;
-    doc.setFontSize(11); doc.text(title, 15, y); y += 10;
-    doc.setFontSize(12); doc.text("Monthly summary", 15, y); y += 7;
-    doc.setFontSize(10);
-    [`Income: ${reportMoney(income)}`, `Expenses: ${reportMoney(expenses)}`, `Moved to NDB savings: ${reportMoney(setAside)}`, `NDB account balance: ${reportMoney(ndbAccount ? accountBalance(ndbAccount) : 0)}`, `Moved to Cash Wallet: ${reportMoney(cashMoved)}`, `Direct cash income: ${reportMoney(cashReceived - cashMoved)}`, `Cash Wallet balance: ${reportMoney(cashAccount ? accountBalance(cashAccount) : 0)}`, `Budget categories reserved: ${reportMoney(budgetAllocated)}`, `Left after spending and allocations: ${reportMoney(leftToSpend)}`].forEach(line => { doc.text(line, 15, y); y += 6; });
-    y += 4; doc.setFontSize(12); doc.text("Budget categories", 15, y); y += 7; doc.setFontSize(10);
-    budgetTotals.forEach(b => { if (y > 275) { doc.addPage(); y = 18; } doc.text(`${b.name} (${b.percent}%): reserved ${reportMoney(b.allocated)} | spent ${reportMoney(b.spent)}`, 15, y); y += 6; });
-    y += 4; doc.setFontSize(12); doc.text("Transactions", 15, y); y += 7; doc.setFontSize(10);
-    reportEntries.forEach(e => {
-      if (y > 275) { doc.addPage(); y = 18; }
-      const label = `${e.date}  ${e.kind === "income" ? "Income" : "Expense"}  ${e.description}  ${e.kind === "income" ? "+" : "-"}${reportMoney(e.amount)}`;
-      doc.text(label.slice(0, 100), 15, y); y += 6;
-      if (e.kind === "income" && (e.savingsAmount || e.cashAmount || e.allocations?.length)) {
-        const reserved = [`NDB ${reportMoney(e.savingsAmount || 0)}`, `Cash ${reportMoney(e.cashAmount || 0)}`, ...(e.allocations || []).map(a => `${a.name} ${reportMoney(a.amount)}`)].join("; ");
-        doc.text(`  Reserved: ${reserved}`.slice(0, 100), 15, y); y += 6;
+  async function downloadReport() {
+    if (reportBusy) return;
+    setReportBusy(true);
+    setReportStatus("");
+    try {
+      const doc = createMonthlyReport({
+        month, income, expenses, savingsMoved: setAside, leftToSpend,
+        cashTransfers: cashMoved, directCashIncome: cashReceived - cashMoved,
+        cashBalance: cashAccount ? accountBalance(cashAccount) : 0,
+        bankAccounts: bankAccounts.map(account => ({ name: account.name, balance: accountBalance(account) })),
+        budgets: budgetTotals.map(budget => ({ name: budget.name, percent: budget.percent, allocated: budget.allocated, spent: budget.spent })),
+        entries: [...entries].sort((a, b) => a.date.localeCompare(b.date) || a.created - b.created).map(entry => ({
+          date: entry.date, kind: entry.kind, description: entry.description,
+          account: state.accounts.find(account => account.id === entry.accountId)?.name || entry.account || "-",
+          amount: entry.amount, savingsAmount: entry.savingsAmount, cashAmount: entry.cashAmount,
+        })),
+      });
+      const fileName = `money-report-${month}.pdf`;
+      if (isNativeApp()) {
+        const base64Data = doc.output("datauristring").split(",")[1];
+        const result = await PdfExport.savePdf({ fileName, base64Data });
+        if (result.saved) setReportStatus("PDF saved to the location you chose.");
+      } else {
+        doc.save(fileName);
+        setReportStatus("PDF download started.");
       }
-    });
-    doc.save(`money-report-${month}.pdf`);
+    } catch (error) {
+      setReportStatus(error instanceof Error ? error.message : "Could not save the PDF. Please try again.");
+    } finally {
+      setReportBusy(false);
+    }
   }
 
   return <div className="shell">
     <header className="topbar"><div className="brand"><div className="mark" aria-hidden="true">$</div><span>My money</span></div><div className="cloud-account"><div className="cloud-identity">{session ? (session.user.user_metadata?.full_name || session.user.email || "Google account") : "Tracker account"}<small>{syncStatus}{lastSyncedTime ? ` · ${lastSyncedTime}` : ""}</small></div>{session ? <button className="account-edit" type="button" onClick={signOut}>Sign out</button> : <button className="google-signin" type="button" disabled={!supabase || !authReady} onClick={signInWithGoogle}>Continue with Google</button>}</div><div className="today">{dayLabel}</div></header>
     {authError && <div className="auth-error" role="alert">{authError}</div>}
     <main>
-      <div className="heading"><div><p className="eyebrow">Your overview</p><h1>Money, made simple.</h1></div><div className="heading-actions"><label className="period"><span>Month</span><input type="month" aria-label="Choose month" value={month} onChange={e => setMonth(e.target.value)} /></label><button className="report-button" type="button" onClick={downloadReport}>Download monthly PDF</button></div></div>
+      <div className="heading"><div><p className="eyebrow">Your overview</p><h1>Money, made simple.</h1></div><div className="heading-actions"><label className="period"><span>Month</span><input type="month" aria-label="Choose month" value={month} onChange={e => { setMonth(e.target.value); setReportStatus(""); }} /></label><button className="report-button" type="button" disabled={reportBusy} onClick={downloadReport}>{reportBusy ? "Preparing PDF..." : "Download monthly PDF"}</button></div></div>
+      {reportStatus && <p className="report-status" role="status">{reportStatus}</p>}
       <section className="cards" aria-label="Monthly totals">
         <article className="card"><div className="card-label"><span className="dot" />Income</div><div className="amount">{money(income)}</div><div className="card-note">this month</div></article>
         <article className="card"><div className="card-label"><span className="dot" />Expenses</div><div className="amount">{money(expenses)}</div><div className="card-note">this month</div></article>

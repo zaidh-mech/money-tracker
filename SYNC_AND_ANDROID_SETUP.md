@@ -19,4 +19,6 @@ The `Build Android APK` GitHub Actions workflow builds an installable debug APK 
 
 To open the native project in Android Studio, open the repository's `android` folder. The project uses Capacitor and packages the same tracker UI as the website. The native Google sign-in returns through the `moneytracker://auth-callback` app link.
 
+Monthly PDFs use Android's system Save as picker. Choose **Downloads** or another folder when prompted; the app writes the PDF to that location. On the website, the same report downloads through the browser.
+
 GitHub artifact downloads expire after 30 days. The workflow restores a project-specific debug signing key from the `ANDROID_DEBUG_KEYSTORE_BASE64` GitHub Actions secret, so later direct-install builds can update the installed app. Keep the local `.private/money-tracker-debug.keystore` backup; losing both it and the secret will prevent in-place updates. A Play Store release needs separate release signing and a publishing setup.
