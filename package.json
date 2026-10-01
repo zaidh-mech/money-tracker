@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
     "dev": "next dev",
     "build": "next build",
-    "build:android": "next build && cap sync android",
+    "build:android": "node android/build-web.mjs",
     "android:open": "cap open android",
     "start": "next start",
     "lint": "next lint"

@@ -4,19 +4,13 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { App } from "@capacitor/app";
 import { Browser } from "@capacitor/browser";
 import type { Session } from "@supabase/supabase-js";
+import { entryMovement, monthlyLeftToSpend, withCarryForward, type Entry } from "@/lib/carry-forward";
 import { createMonthlyReport } from "@/lib/monthly-report";
 import { PdfExport } from "@/lib/pdf-export";
 import { isNativeApp, nativeAuthRedirect, supabase } from "@/lib/supabase";
 
 type Kind = "income" | "expense";
 type Budget = { id: string; name: string; percent: number };
-type Allocation = { budgetId: string; name: string; amount: number };
-type Entry = {
-  id: string; kind: Kind; description: string; account: string; accountId: string;
-  amount: number; date: string; created: number; allocationsEnabled?: boolean;
-  savingsAmount?: number; savingsAccountId?: string; allocations?: Allocation[];
-  cashAmount?: number; cashAccountId?: string;
-};
 type Account = { id: string; name: string; openingBalance: number };
 type State = { entries: Entry[]; accounts: Account[]; rate: number; cashRate: number; budgets: Budget[] };
 
@@ -80,7 +74,7 @@ function addCoreAccounts(accounts: Account[]) {
 }
 
 export default function Home() {
-  const today = useMemo(() => localDate(), []);
+  const [today, setToday] = useState(() => localDate());
   const [state, setState] = useState<State>(emptyState);
   const [ready, setReady] = useState(false);
   const [month, setMonth] = useState(today.slice(0, 7));
@@ -134,6 +128,27 @@ export default function Home() {
     } catch { /* Ignore invalid or unavailable saved data. */ }
     setReady(true);
   }, []);
+
+  useEffect(() => {
+    const refreshDate = () => setToday(localDate());
+    const timer = window.setInterval(refreshDate, 30_000);
+    window.addEventListener("focus", refreshDate);
+    document.addEventListener("visibilitychange", refreshDate);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshDate);
+      document.removeEventListener("visibilitychange", refreshDate);
+    };
+  }, []);
+
+  const previousToday = useRef(today);
+  useEffect(() => {
+    const previous = previousToday.current;
+    previousToday.current = today;
+    setMonth(selected => selected === previous.slice(0, 7) ? today.slice(0, 7) : selected);
+    setDate(selected => selected === previous ? today : selected);
+    setDayLabel(new Intl.DateTimeFormat(undefined, { weekday: "short", month: "long", day: "numeric" }).format(new Date(`${today}T00:00:00`)));
+  }, [today]);
 
   useEffect(() => { if (ready) localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }, [ready, state]);
 
@@ -238,19 +253,10 @@ export default function Home() {
   }, [state, session?.user.id, syncEnabled]);
 
 
-  const entryMovement = (e: Entry, id: string) => {
-    const transaction = e.accountId === id ? (e.kind === "income" ? 1 : -1) * Number(e.amount) : 0;
-    const saved = Number(e.savingsAmount) || 0;
-    const transferOut = e.kind === "income" && e.accountId === id ? saved : 0;
-    const transferIn = e.kind === "income" && e.savingsAccountId === id ? saved : 0;
-    const cash = Number(e.cashAmount) || 0;
-    const cashOut = e.kind === "income" && e.accountId === id ? cash : 0;
-    const cashIn = e.kind === "income" && e.cashAccountId === id ? cash : 0;
-    return transaction - transferOut + transferIn - cashOut + cashIn;
-  };
+  const ledgerEntries = useMemo(() => withCarryForward(state.entries, state.budgets.map(b => b.id), today.slice(0, 7)), [state.entries, state.budgets, today]);
   const accountMovement = (id: string) => state.entries.reduce((sum, e) => sum + entryMovement(e, id), 0);
   const accountBalance = (item: Account) => item.openingBalance + accountMovement(item.id);
-  const chronologicalEntries = [...state.entries].filter(e => e.date).sort((a, b) => a.date.localeCompare(b.date) || a.created - b.created);
+  const chronologicalEntries = [...ledgerEntries].filter(e => e.date).sort((a, b) => a.date.localeCompare(b.date) || a.created - b.created);
   const runningBalances = new Map(state.accounts.map(a => [a.id, a.openingBalance]));
   const balanceAfterEntry = new Map<string, number>();
   for (const e of chronologicalEntries) {
@@ -260,7 +266,7 @@ export default function Home() {
     }
     if (e.accountId) balanceAfterEntry.set(e.id, runningBalances.get(e.accountId) || 0);
   }
-  const entries = state.entries.filter(e => e.date && e.date.slice(0, 7) === month);
+  const entries = ledgerEntries.filter(e => e.date && e.date.slice(0, 7) === month);
   const income = entries.filter(e => e.kind === "income").reduce((sum, e) => sum + e.amount, 0);
   const expenses = entries.filter(e => e.kind === "expense").reduce((sum, e) => sum + e.amount, 0);
   const setAside = entries.reduce((sum, e) => sum + (Number(e.savingsAmount) || 0), 0);
@@ -273,11 +279,10 @@ export default function Home() {
     allocated: entries.reduce((sum, e) => sum + (e.allocations || []).filter(a => a.budgetId === budget.id).reduce((total, a) => total + a.amount, 0), 0),
     spent: entries.filter(e => e.kind === "expense" && e.description.trim().toLowerCase() === budget.name.trim().toLowerCase()).reduce((sum, e) => sum + e.amount, 0),
   }));
-  const budgetAllocated = budgetTotals.reduce((sum, b) => sum + b.allocated, 0);
-  const leftToSpend = income - expenses - setAside - budgetAllocated;
+  const leftToSpend = monthlyLeftToSpend(entries, state.budgets.map(b => b.id));
   const cashMoved = entries.reduce((sum, e) => sum + (Number(e.cashAmount) || 0), 0);
   const cashAccount = state.accounts.find(a => isCashWallet(a.name));
-  const cashReceived = cashMoved + entries.filter(e => e.kind === "income" && e.accountId === cashAccount?.id).reduce((sum, e) => sum + e.amount, 0);
+  const cashReceived = cashMoved + entries.filter(e => e.kind === "income" && !e.carryForwardFrom && e.accountId === cashAccount?.id).reduce((sum, e) => sum + e.amount, 0);
   const bankAccounts = state.accounts.filter(a => !isCashWallet(a.name));
   const bankAccountsTotal = bankAccounts.reduce((sum, account) => sum + accountBalance(account), 0);
   const plannedPercent = state.rate + state.cashRate + state.budgets.reduce((sum, b) => sum + b.percent, 0);
@@ -439,9 +444,9 @@ export default function Home() {
           <section className="panel savings" aria-labelledby="savingsHeading"><div className="savings-head"><div className="savings-title"><div className="savings-icon" aria-hidden="true">↗</div><div><h2 id="savingsHeading">NDB savings</h2><p className="savings-sub">Salary transfers from Commercial Bank; other income is opt-in.</p></div></div><strong className="savings-rate">{state.rate}%</strong></div><div className="bar" aria-label="Monthly savings progress"><div className="bar-fill" style={{ width: `${Math.max(0, Math.min(100, state.rate))}%` }} /></div><div className="savings-foot"><span>{money(Math.max(0, setAside))} moved this month</span><strong>{money(allSaved)} total saved</strong></div></section>
           <section className="panel activity" aria-labelledby="activityHeading"><div className="activity-head"><h2 id="activityHeading">Transactions</h2><span className="count">{entries.length} {entries.length === 1 ? "entry" : "entries"}</span></div><p className="panel-caption date-balance-caption">Account balances follow transaction dates, so adding an earlier income recalculates the later balances.</p><div className="rows">{sorted.length ? sorted.map(e => {
             const linked = state.accounts.find(a => a.id === e.accountId);
-            const details = e.kind === "income" ? (linked ? `Income to ${linked.name}` : "Income") : `From ${e.account}`;
+            const details = e.carryForwardFrom ? "Automatic carry forward, balances unchanged" : e.kind === "income" ? (linked ? `Income to ${linked.name}` : "Income") : `From ${e.account}`;
             const balance = balanceAfterEntry.get(e.id);
-            return <div className="row" key={e.id}><div className="row-main"><div className={`row-icon ${e.kind === "expense" ? "expense" : ""}`} aria-hidden="true">{e.kind === "income" ? "+" : "−"}</div><div className="row-copy"><div className="row-name">{e.description}</div><div className="row-meta">{details} · {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(`${e.date}T00:00:00`))}</div>{linked && balance !== undefined && <div className="row-meta balance-meta">{linked.name} after this: {money(balance)}</div>}{e.kind === "expense" && !linked && <select className="row-account-link" aria-label={`Link ${e.description} to an account`} value="" onChange={event => linkExpenseToAccount(e.id, event.target.value)}><option value="">Choose account to fix balance</option>{state.accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select>}</div></div><div className={`row-value ${e.kind}`}>{e.kind === "income" ? "+" : "−"}{money(e.amount)}</div><button className="delete" type="button" onClick={() => setState(s => ({ ...s, entries: s.entries.filter(entry => entry.id !== e.id) }))} aria-label={`Delete ${e.description}`}>×</button></div>;
+            return <div className="row" key={e.id}><div className="row-main"><div className={`row-icon ${e.kind === "expense" ? "expense" : ""}`} aria-hidden="true">{e.kind === "income" ? "+" : "−"}</div><div className="row-copy"><div className="row-name">{e.description}</div><div className="row-meta">{details} · {new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(`${e.date}T00:00:00`))}</div>{linked && balance !== undefined && <div className="row-meta balance-meta">{linked.name} after this: {money(balance)}</div>}{e.kind === "expense" && !linked && <select className="row-account-link" aria-label={`Link ${e.description} to an account`} value="" onChange={event => linkExpenseToAccount(e.id, event.target.value)}><option value="">Choose account to fix balance</option>{state.accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select>}</div></div><div className={`row-value ${e.kind}`}>{e.kind === "income" ? "+" : "−"}{money(e.amount)}</div>{!e.carryForwardFrom && <button className="delete" type="button" onClick={() => setState(s => ({ ...s, entries: s.entries.filter(entry => entry.id !== e.id) }))} aria-label={`Delete ${e.description}`}>×</button>}</div>;
           }) : <div className="empty">No transactions for this month yet.<br />Add your income or an expense to get started.</div>}</div></section>
         </div>
       </section>

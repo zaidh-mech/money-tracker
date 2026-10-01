@@ -44,6 +44,26 @@ dependencies {
 
 apply from: 'capacitor.build.gradle'
 
+// A Pages export has a /money-tracker prefix that cannot load in Capacitor.
+// Stop before packaging an APK with missing styles or JavaScript.
+def verifyWebAssets = tasks.register('verifyWebAssets') {
+    doLast {
+        def webRoot = file('src/main/assets/public')
+        def index = new File(webRoot, 'index.html')
+        if (!index.isFile()) {
+            throw new GradleException('Missing web assets. Run npm run build:android from the repository root first.')
+        }
+        def assets = (index.getText('UTF-8') =~ /(?:href|src)="([^"\s]+)"/)
+            .collect { it[1] }.findAll { it.contains('/_next/') }
+        if (!assets.any { it.endsWith('.css') } || assets.any {
+            !it.startsWith('/_next/') || !new File(webRoot, it.substring(1)).isFile()
+        }) {
+            throw new GradleException('Broken Android web asset paths. Run npm run build:android from the repository root before rebuilding the APK.')
+        }
+    }
+}
+tasks.named('preBuild').configure { dependsOn(verifyWebAssets) }
+
 try {
     def servicesJSON = file('google-services.json')
     if (servicesJSON.text) {
